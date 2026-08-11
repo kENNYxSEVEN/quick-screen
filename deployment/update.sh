@@ -26,6 +26,7 @@ API_PORT=""
 MEDIA_PORT=""
 UPDATE_IN_PROGRESS=false
 UPDATE_SUCCEEDED=false
+PREVIOUS_VERSION=""
 
 info() {
   printf '[INFO] %s\n' "$*"
@@ -205,6 +206,34 @@ validate_domain() {
     die "Domain must be a valid fully qualified domain name."
 }
 
+show_up_to_date() {
+  local bold=""
+  local green=""
+  local cyan=""
+  local reset=""
+
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    bold=$'\033[1m'
+    green=$'\033[32m'
+    cyan=$'\033[36m'
+    reset=$'\033[0m'
+  fi
+
+  printf '\n'
+  printf '%b============================================================%b\n' "${green}${bold}" "${reset}"
+  printf '%b  ✓ QUICK SCREEN IS UP TO DATE%b\n' "${green}${bold}" "${reset}"
+  printf '%b============================================================%b\n' "${green}${bold}" "${reset}"
+  printf '\n'
+  printf '  Version       %b%s%b\n' "${cyan}${bold}" "${TARGET_VERSION}" "${reset}"
+  printf '  API           %b✓%b %s\n' "${green}" "${reset}" "$(systemctl is-active "${API_SERVICE}" || true)"
+  printf '  Media         %b✓%b %s\n' "${green}" "${reset}" "$(systemctl is-active "${MEDIA_SERVICE}" || true)"
+  printf '\n'
+  printf '  No files were changed and no services were restarted.\n'
+  printf '\n'
+  printf '%b============================================================%b\n' "${green}${bold}" "${reset}"
+  printf '\n'
+}
+
 prepare_release_bundle() {
   if [[ -z "${TARGET_VERSION}" ]]; then
     info "Checking the latest GitHub release..."
@@ -213,14 +242,13 @@ prepare_release_bundle() {
     validate_release_tag "${TARGET_VERSION}"
   fi
 
-  local installed_version
-  installed_version="$(current_version)"
+  PREVIOUS_VERSION="$(current_version)"
 
-  printf 'Current version: %s\n' "${installed_version}"
+  printf 'Current version: %s\n' "${PREVIOUS_VERSION}"
   printf 'Target version:  %s\n' "${TARGET_VERSION}"
 
-  if [[ "${installed_version}" == "${TARGET_VERSION}" && "${FORCE}" != true ]]; then
-    printf '\nQUICK SCREEN %s is already up to date.\n' "${TARGET_VERSION}"
+  if [[ "${PREVIOUS_VERSION}" == "${TARGET_VERSION}" && "${FORCE}" != true ]]; then
+    show_up_to_date
     exit 0
   fi
 
@@ -365,12 +393,47 @@ perform_update() {
 }
 
 show_summary() {
-  printf '\nQUICK SCREEN update complete.\n'
-  printf 'Version: %s\n' "${TARGET_VERSION}"
-  printf 'API service: %s\n' "$(systemctl is-active "${API_SERVICE}" || true)"
-  printf 'Media service: %s\n' "$(systemctl is-active "${MEDIA_SERVICE}" || true)"
-  printf 'Environment: preserved\n'
-  printf 'Nginx configuration: preserved\n'
+  local api_status
+  local media_status
+  local bold=""
+  local green=""
+  local cyan=""
+  local reset=""
+
+  api_status="$(systemctl is-active "${API_SERVICE}" || true)"
+  media_status="$(systemctl is-active "${MEDIA_SERVICE}" || true)"
+
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    bold=$'\033[1m'
+    green=$'\033[32m'
+    cyan=$'\033[36m'
+    reset=$'\033[0m'
+  fi
+
+  printf '\n'
+  printf '%b============================================================%b\n' "${green}${bold}" "${reset}"
+  printf '%b  ✓ QUICK SCREEN UPDATED SUCCESSFULLY%b\n' "${green}${bold}" "${reset}"
+  printf '%b============================================================%b\n' "${green}${bold}" "${reset}"
+  printf '\n'
+
+  printf '%bUpdate%b\n' "${bold}" "${reset}"
+  printf '  Version       %b%s%b  →  %b%s%b\n' \
+    "${cyan}" "${PREVIOUS_VERSION}" "${reset}" \
+    "${cyan}${bold}" "${TARGET_VERSION}" "${reset}"
+  printf '  API           %b✓%b %s\n' "${green}" "${reset}" "${api_status}"
+  printf '  Media         %b✓%b %s\n' "${green}" "${reset}" "${media_status}"
+  printf '  Environment   %b✓%b preserved\n' "${green}" "${reset}"
+  printf '  Nginx         %b✓%b preserved\n' "${green}" "${reset}"
+  printf '\n'
+
+  printf '%bNext update%b\n' "${bold}" "${reset}"
+  printf '  sudo %s/update.sh\n' "${INSTALL_ROOT}"
+  printf '\n'
+
+  printf '%b============================================================%b\n' "${green}${bold}" "${reset}"
+  printf '%b  Update finished. QUICK SCREEN is ready.%b\n' "${green}${bold}" "${reset}"
+  printf '%b============================================================%b\n' "${green}${bold}" "${reset}"
+  printf '\n'
 }
 
 parse_arguments() {

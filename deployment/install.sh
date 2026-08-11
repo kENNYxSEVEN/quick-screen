@@ -16,6 +16,8 @@ readonly DEFAULT_API_PORT="3001"
 readonly DEFAULT_MEDIA_PORT="3002"
 readonly DEFAULT_UDP_PORT_MIN="50000"
 readonly DEFAULT_UDP_PORT_MAX="50100"
+readonly ACME_WEBROOT="/var/lib/letsencrypt"
+readonly CERTBOT_RELOAD_HOOK="/etc/letsencrypt/renewal-hooks/deploy/quick-screen-nginx-reload"
 
 SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
 BUNDLE_DIRECTORY="${SCRIPT_DIRECTORY}"
@@ -25,6 +27,8 @@ DOMAIN=""
 PUBLIC_IPV4=""
 SSL_CERT=""
 SSL_KEY=""
+LETSENCRYPT_EMAIL=""
+USE_LETSENCRYPT=false
 API_PORT="${DEFAULT_API_PORT}"
 MEDIA_PORT="${DEFAULT_MEDIA_PORT}"
 UDP_PORT_MIN="${DEFAULT_UDP_PORT_MIN}"
@@ -38,6 +42,10 @@ info() {
 
 ok() {
   printf '[ OK ] %s\n' "$*"
+}
+
+warn() {
+  printf '[WARN] %s\n' "$*" >&2
 }
 
 die() {
@@ -62,6 +70,8 @@ Options:
   --public-ip <IPv4>        Public IPv4 address of this server
   --ssl-cert <path>         Existing TLS certificate path
   --ssl-key <path>          Existing TLS private key path
+  --letsencrypt-email <email>
+                            Automatically obtain a Let's Encrypt certificate
   --api-port <port>         API TCP port (default: 3001)
   --media-port <port>       Media HTTP TCP port (default: 3002)
   --udp-port-min <port>     Pion UDP range start (default: 50000)
@@ -254,6 +264,19 @@ prompt_required() {
   printf '%s' "${value}"
 }
 
+prompt_optional() {
+  local label=$1
+  local current_value=$2
+  local value="${current_value}"
+
+  if [[ -z "${value}" ]] && can_prompt; then
+    read -r -p "${label}: " value </dev/tty
+  fi
+
+  value="$(trim_whitespace "${value}")"
+  printf '%s' "${value}"
+}
+
 prompt_with_default() {
   local label=$1
   local current_value=$2
@@ -306,7 +329,12 @@ validate_public_ipv4() {
   fi
 }
 
-validate_configuration() {
+validate_email() {
+  [[ "$1" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || \
+    die "Let's Encrypt email address is invalid."
+}
+
+validate_base_configuration() {
   validate_domain "${DOMAIN}"
   validate_public_ipv4 "${PUBLIC_IPV4}"
   is_valid_port "${API_PORT}" || die "API port must be an integer between 1 and 65535."
@@ -315,8 +343,45 @@ validate_configuration() {
   is_valid_port "${UDP_PORT_MAX}" || die "UDP port maximum must be an integer between 1 and 65535."
   (( 10#${API_PORT} != 10#${MEDIA_PORT} )) || die "API and media ports must be different."
   (( 10#${UDP_PORT_MIN} <= 10#${UDP_PORT_MAX} )) || die "UDP port minimum must not exceed UDP port maximum."
+}
+
+validate_tls_configuration() {
   [[ -f "${SSL_CERT}" && -r "${SSL_CERT}" ]] || die "TLS certificate is not readable: ${SSL_CERT}"
   [[ -f "${SSL_KEY}" && -r "${SSL_KEY}" ]] || die "TLS private key is not readable: ${SSL_KEY}"
+}
+
+configure_tls() {
+  if [[ -n "${LETSENCRYPT_EMAIL}" && ( -n "${SSL_CERT}" || -n "${SSL_KEY}" ) ]]; then
+    die "--letsencrypt-email cannot be combined with --ssl-cert or --ssl-key."
+  fi
+
+  if [[ -n "${LETSENCRYPT_EMAIL}" ]]; then
+    USE_LETSENCRYPT=true
+    LETSENCRYPT_EMAIL="$(trim_whitespace "${LETSENCRYPT_EMAIL}")"
+    validate_email "${LETSENCRYPT_EMAIL}"
+    return
+  fi
+
+  if [[ -n "${SSL_CERT}" || -n "${SSL_KEY}" ]]; then
+    SSL_CERT="$(prompt_required "TLS certificate path" "${SSL_CERT}")"
+    SSL_KEY="$(prompt_required "TLS private key path" "${SSL_KEY}")"
+    USE_LETSENCRYPT=false
+    return
+  fi
+
+  if [[ "${NON_INTERACTIVE}" == true ]]; then
+    die "Provide --ssl-cert and --ssl-key, or --letsencrypt-email, when using --non-interactive."
+  fi
+
+  SSL_CERT="$(prompt_optional "TLS certificate path [leave blank for automatic Let's Encrypt]" "")"
+  if [[ -n "${SSL_CERT}" ]]; then
+    SSL_KEY="$(prompt_required "TLS private key path" "")"
+    USE_LETSENCRYPT=false
+  else
+    USE_LETSENCRYPT=true
+    LETSENCRYPT_EMAIL="$(prompt_required "Let's Encrypt email" "")"
+    validate_email "${LETSENCRYPT_EMAIL}"
+  fi
 }
 
 require_fresh_installation() {
@@ -478,12 +543,123 @@ EOF_MEDIA_SERVICE
   ok "systemd services written."
 }
 
+ensure_certbot() {
+  if command -v certbot >/dev/null 2>&1; then
+    return
+  fi
+
+  require_command apt-get
+  info "Certbot is not installed; installing the Ubuntu/Debian package..."
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y certbot
+  require_command certbot
+  ok "Certbot installed."
+}
+
+assert_nginx_site_available() {
+  local vhost_path="/etc/nginx/sites-available/${DOMAIN}"
+  local enabled_path="/etc/nginx/sites-enabled/${DOMAIN}"
+
+  if [[ -e "${vhost_path}" || -e "${enabled_path}" || -L "${enabled_path}" ]]; then
+    die "An Nginx site for ${DOMAIN} already exists. Refusing to overwrite it during a fresh install."
+  fi
+}
+
+write_acme_http_vhost() {
+  local vhost_path="/etc/nginx/sites-available/${DOMAIN}"
+  local enabled_path="/etc/nginx/sites-enabled/${DOMAIN}"
+
+  install -d -o root -g root -m 0755 "${ACME_WEBROOT}/.well-known/acme-challenge"
+
+  cat > "${vhost_path}" <<EOF_ACME_NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root ${ACME_WEBROOT};
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
+    location / {
+        default_type "text/plain";
+        return 200 "QUICK SCREEN TLS setup\\n";
+    }
+}
+EOF_ACME_NGINX
+
+  ln -s "../sites-available/${DOMAIN}" "${enabled_path}"
+  nginx -t
+  systemctl enable --now nginx
+  systemctl reload nginx
+  ok "Temporary HTTP virtual host enabled for ACME validation."
+}
+
+configure_certbot_renewal() {
+  install -d -o root -g root -m 0755 "$(dirname -- "${CERTBOT_RELOAD_HOOK}")"
+  cat > "${CERTBOT_RELOAD_HOOK}" <<'EOF_CERTBOT_HOOK'
+#!/bin/sh
+set -eu
+systemctl reload nginx
+EOF_CERTBOT_HOOK
+  chmod 0755 "${CERTBOT_RELOAD_HOOK}"
+
+  if systemctl list-unit-files certbot.timer --no-legend 2>/dev/null | grep -q '^certbot\.timer'; then
+    systemctl enable --now certbot.timer
+    ok "Certbot automatic renewal timer enabled."
+  else
+    warn "No certbot.timer unit was found. Verify automatic renewal with: certbot renew --dry-run"
+  fi
+}
+
+obtain_letsencrypt_certificate() {
+  ensure_certbot
+  assert_nginx_site_available
+  write_acme_http_vhost
+
+  info "Requesting a Let's Encrypt certificate for ${DOMAIN}..."
+  info "TCP port 80 must be reachable publicly and ${DOMAIN} must resolve to this server."
+
+  certbot certonly \
+    --webroot \
+    --webroot-path "${ACME_WEBROOT}" \
+    --domain "${DOMAIN}" \
+    --cert-name "${DOMAIN}" \
+    --email "${LETSENCRYPT_EMAIL}" \
+    --agree-tos \
+    --non-interactive \
+    --keep-until-expiring
+
+  SSL_CERT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+  SSL_KEY="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+  validate_tls_configuration
+  configure_certbot_renewal
+  ok "Let's Encrypt certificate is ready."
+}
+
 write_nginx_vhost() {
   local web_directory="/var/www/${DOMAIN}"
   local vhost_path="/etc/nginx/sites-available/${DOMAIN}"
   local enabled_path="/etc/nginx/sites-enabled/${DOMAIN}"
+  local acme_location=""
 
-  [[ ! -e "${enabled_path}" || -L "${enabled_path}" ]] || die "Refusing to replace non-symlink nginx site: ${enabled_path}"
+  if [[ "${USE_LETSENCRYPT}" == true ]]; then
+    acme_location="$(cat <<EOF_ACME_LOCATION
+    location ^~ /.well-known/acme-challenge/ {
+        root ${ACME_WEBROOT};
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
+EOF_ACME_LOCATION
+)"
+  fi
+
+  if [[ -e "${enabled_path}" && ! -L "${enabled_path}" ]]; then
+    die "Refusing to replace non-symlink nginx site: ${enabled_path}"
+  fi
 
   cat > "${vhost_path}" <<EOF_NGINX
 server {
@@ -491,7 +667,9 @@ server {
     listen [::]:80;
     server_name ${DOMAIN};
 
-    return 301 https://\$host\$request_uri;
+${acme_location}    location / {
+        return 301 https://\$host\$request_uri;
+    }
 }
 
 server {
@@ -555,20 +733,66 @@ wait_for_health() {
 
 show_summary() {
   local installed_version="unknown"
-  [[ -f "${INSTALL_ROOT}/VERSION" ]] && installed_version="$(tr -d '\r\n' < "${INSTALL_ROOT}/VERSION")"
+  local api_status
+  local media_status
+  local tls_status
+  local bold=""
+  local green=""
+  local cyan=""
+  local yellow=""
+  local reset=""
 
-  printf '\nQUICK SCREEN installation complete.\n'
-  printf 'Version: %s\n' "${installed_version}"
-  printf 'URL: https://%s\n' "${DOMAIN}"
-  printf 'API service: %s\n' "$(systemctl is-active "${API_SERVICE}" || true)"
-  printf 'Media service: %s\n' "$(systemctl is-active "${MEDIA_SERVICE}" || true)"
-  printf 'Pion UDP range: %s-%s\n' "${UDP_PORT_MIN}" "${UDP_PORT_MAX}"
-  printf 'Updater: %s/update.sh\n' "${INSTALL_ROOT}"
-  printf '\nLogs:\n'
-  printf '  journalctl -u %s -f\n' "${API_SERVICE}"
-  printf '  journalctl -u %s -f\n' "${MEDIA_SERVICE}"
-  printf '\nUDP %s-%s must be allowed in the VPS/provider firewall. The installer does not modify firewall rules.\n' \
-    "${UDP_PORT_MIN}" "${UDP_PORT_MAX}"
+  [[ -f "${INSTALL_ROOT}/VERSION" ]] && installed_version="$(tr -d '\r\n' < "${INSTALL_ROOT}/VERSION")"
+  api_status="$(systemctl is-active "${API_SERVICE}" || true)"
+  media_status="$(systemctl is-active "${MEDIA_SERVICE}" || true)"
+
+  if [[ "${USE_LETSENCRYPT}" == true ]]; then
+    tls_status="Let's Encrypt · automatic renewal enabled"
+  else
+    tls_status="Existing certificate files"
+  fi
+
+  # Keep redirected/non-interactive output plain, but make terminal output
+  # immediately recognizable as a successful installation.
+  if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    bold=$'\033[1m'
+    green=$'\033[32m'
+    cyan=$'\033[36m'
+    yellow=$'\033[33m'
+    reset=$'\033[0m'
+  fi
+
+  printf '\n'
+  printf '%b============================================================%b\n' "${green}${bold}" "${reset}"
+  printf '%b  ✓ QUICK SCREEN INSTALLED SUCCESSFULLY%b\n' "${green}${bold}" "${reset}"
+  printf '%b============================================================%b\n' "${green}${bold}" "${reset}"
+  printf '\n'
+
+  printf '%bOpen QUICK SCREEN%b\n' "${bold}" "${reset}"
+  printf '  %bhttps://%s%b\n' "${cyan}${bold}" "${DOMAIN}" "${reset}"
+  printf '\n'
+
+  printf '%bInstallation%b\n' "${bold}" "${reset}"
+  printf '  Version       %s\n' "${installed_version}"
+  printf '  API           %b✓%b %s\n' "${green}" "${reset}" "${api_status}"
+  printf '  Media         %b✓%b %s\n' "${green}" "${reset}" "${media_status}"
+  printf '  TLS           %b✓%b %s\n' "${green}" "${reset}" "${tls_status}"
+  printf '  UDP range     %s-%s\n' "${UDP_PORT_MIN}" "${UDP_PORT_MAX}"
+  printf '\n'
+
+  printf '%bMaintenance%b\n' "${bold}" "${reset}"
+  printf '  Update        sudo %s/update.sh\n' "${INSTALL_ROOT}"
+  printf '  API logs      journalctl -u %s -f\n' "${API_SERVICE}"
+  printf '  Media logs    journalctl -u %s -f\n' "${MEDIA_SERVICE}"
+  printf '\n'
+
+  printf '%b! Network reminder:%b allow UDP %s-%s in the VPS/provider firewall.\n' \
+    "${yellow}${bold}" "${reset}" "${UDP_PORT_MIN}" "${UDP_PORT_MAX}"
+  printf '\n'
+  printf '%b============================================================%b\n' "${green}${bold}" "${reset}"
+  printf '%b  Installation finished. QUICK SCREEN is ready.%b\n' "${green}${bold}" "${reset}"
+  printf '%b============================================================%b\n' "${green}${bold}" "${reset}"
+  printf '\n'
 }
 
 parse_arguments() {
@@ -579,6 +803,7 @@ parse_arguments() {
       --public-ip) PUBLIC_IPV4=${2:-}; shift 2 ;;
       --ssl-cert) SSL_CERT=${2:-}; shift 2 ;;
       --ssl-key) SSL_KEY=${2:-}; shift 2 ;;
+      --letsencrypt-email) LETSENCRYPT_EMAIL=${2:-}; shift 2 ;;
       --api-port) API_PORT=${2:-}; shift 2 ;;
       --media-port) MEDIA_PORT=${2:-}; shift 2 ;;
       --udp-port-min) UDP_PORT_MIN=${2:-}; shift 2 ;;
@@ -606,13 +831,19 @@ main() {
 
   DOMAIN="$(prompt_required "Domain" "${DOMAIN}")"
   PUBLIC_IPV4="$(prompt_required "Public IPv4" "${PUBLIC_IPV4}")"
-  SSL_CERT="$(prompt_required "TLS certificate path" "${SSL_CERT}")"
-  SSL_KEY="$(prompt_required "TLS private key path" "${SSL_KEY}")"
+  configure_tls
   API_PORT="$(prompt_with_default "API port" "${API_PORT}" "${DEFAULT_API_PORT}")"
   MEDIA_PORT="$(prompt_with_default "Media port" "${MEDIA_PORT}" "${DEFAULT_MEDIA_PORT}")"
   UDP_PORT_MIN="$(prompt_with_default "Pion UDP port minimum" "${UDP_PORT_MIN}" "${DEFAULT_UDP_PORT_MIN}")"
   UDP_PORT_MAX="$(prompt_with_default "Pion UDP port maximum" "${UDP_PORT_MAX}" "${DEFAULT_UDP_PORT_MAX}")"
-  validate_configuration
+  validate_base_configuration
+
+  if [[ "${USE_LETSENCRYPT}" == true ]]; then
+    obtain_letsencrypt_certificate
+  else
+    validate_tls_configuration
+    assert_nginx_site_available
+  fi
 
   ensure_service_account
   install_artifacts
