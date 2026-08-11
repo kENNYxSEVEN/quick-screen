@@ -1,0 +1,24 @@
+{
+  "name": "screen-share",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.20.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter api --filter web dev",
+    "dev:api": "pnpm --filter api dev",
+    "dev:media": "node --env-file-if-exists=./apps/media/.env ./apps/media/scripts/dev.mjs",
+    "dev:web": "pnpm --filter web dev",
+    "build": "pnpm --filter api build && pnpm --filter web build",
+    "build:deploy": "node ./scripts/build-deploy.mjs",
+    "test": "pnpm --filter api test",
+    "test:media": "go -C apps/media test ./...",
+    "vet:media": "go -C apps/media vet ./...",
+    "lint": "pnpm --filter api lint && pnpm --filter web lint",
+    "preview": "pnpm --filter web preview",
+    "typecheck": "pnpm --filter api typecheck && pnpm --filter web exec tsc --noEmit"
+  },
+  "devDependencies": {
+    "turbo": "^2.10.8",
+    "typescript": "^7.0.2"
+  }
+}

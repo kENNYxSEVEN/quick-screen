@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Low-latency screen sharing for focused conversations."
+    />
+    <title>QUICK SCREEN</title>
+    <script>
+      (() => {
+        const updateTitle = () => {
+          const roomId = window.location.pathname.split("/").filter(Boolean)[0];
+          document.title = roomId ? `${decodeURIComponent(roomId)} — QUICK SCREEN` : "QUICK SCREEN";
+        };
+
+        const wrapHistoryMethod = (methodName) => {
+          const original = history[methodName];
+          history[methodName] = function (...args) {
+            const result = original.apply(this, args);
+            updateTitle();
+            return result;
+          };
+        };
+
+        wrapHistoryMethod("pushState");
+        wrapHistoryMethod("replaceState");
+        window.addEventListener("popstate", updateTitle);
+        updateTitle();
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
