@@ -2,6 +2,8 @@
 
 set -Eeuo pipefail
 
+readonly GITHUB_REPOSITORY="kENNYxSEVEN/quick-screen"
+readonly GITHUB_URL="https://github.com/${GITHUB_REPOSITORY}"
 readonly SERVICE_USER="screen-share"
 readonly SERVICE_GROUP="screen-share"
 readonly INSTALL_ROOT="/opt/screen-share"
@@ -15,7 +17,10 @@ readonly DEFAULT_MEDIA_PORT="3002"
 readonly DEFAULT_UDP_PORT_MIN="50000"
 readonly DEFAULT_UDP_PORT_MAX="50100"
 
-SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
+BUNDLE_DIRECTORY="${SCRIPT_DIRECTORY}"
+WORK_DIRECTORY=""
+RELEASE_TAG=""
 DOMAIN=""
 PUBLIC_IPV4=""
 SSL_CERT=""
@@ -27,30 +32,49 @@ UDP_PORT_MAX="${DEFAULT_UDP_PORT_MAX}"
 NON_INTERACTIVE=false
 NODE_BIN=""
 
+info() {
+  printf '[INFO] %s\n' "$*"
+}
+
+ok() {
+  printf '[ OK ] %s\n' "$*"
+}
+
 die() {
-  printf 'Error: %s\n' "$*" >&2
+  printf '[FAIL] %s\n' "$*" >&2
   exit 1
 }
 
 usage() {
-  cat <<'EOF'
+  cat <<'EOF_USAGE'
 Usage: sudo ./install.sh [options]
 
-Installs the ready-made screen-share deployment artifact from this directory.
-No application build is performed on the server.
+Installs QUICK SCREEN on an x86_64 Ubuntu/Debian server.
+
+When the deployment artifacts are not present next to this script, the installer
+retrieves the requested release from GitHub, verifies its SHA-256 checksum, and
+installs the ready-made release bundle. No application build is performed on the
+server.
 
 Options:
-  --domain <domain>          Public domain, for example share.example.com
-  --public-ip <IPv4>         Public IPv4 address of this server
-  --ssl-cert <path>          Existing TLS certificate path
-  --ssl-key <path>           Existing TLS private key path
-  --api-port <port>          API TCP port (default: 3001)
-  --media-port <port>        Media HTTP TCP port (default: 3002)
-  --udp-port-min <port>      Pion UDP range start (default: 50000)
-  --udp-port-max <port>      Pion UDP range end (default: 50100)
-  --non-interactive          Fail instead of prompting for missing values
-  -h, --help                 Show this help
-EOF
+  --version <tag>           Release to install, for example v0.1.1 (default: latest)
+  --domain <domain>         Public domain, for example share.example.com
+  --public-ip <IPv4>        Public IPv4 address of this server
+  --ssl-cert <path>         Existing TLS certificate path
+  --ssl-key <path>          Existing TLS private key path
+  --api-port <port>         API TCP port (default: 3001)
+  --media-port <port>       Media HTTP TCP port (default: 3002)
+  --udp-port-min <port>     Pion UDP range start (default: 50000)
+  --udp-port-max <port>     Pion UDP range end (default: 50100)
+  --non-interactive         Fail instead of prompting for missing values
+  -h, --help                Show this help
+EOF_USAGE
+}
+
+cleanup() {
+  if [[ -n "${WORK_DIRECTORY}" && -d "${WORK_DIRECTORY}" ]]; then
+    rm -rf -- "${WORK_DIRECTORY}"
+  fi
 }
 
 on_error() {
@@ -59,6 +83,7 @@ on_error() {
   exit "${exit_code}"
 }
 
+trap cleanup EXIT
 trap 'on_error $LINENO' ERR
 
 require_root() {
@@ -74,7 +99,7 @@ require_supported_platform() {
   # shellcheck disable=SC1091
   . /etc/os-release
   [[ "${ID:-}" == "debian" || "${ID:-}" == "ubuntu" ]] || die "Only Debian and Ubuntu are supported."
-  [[ "$(uname -m)" == "x86_64" ]] || die "This artifact requires an x86_64 server."
+  [[ "$(uname -m)" == "x86_64" ]] || die "This release requires an x86_64 server."
 }
 
 require_node() {
@@ -88,12 +113,131 @@ require_node() {
   (( node_major >= 22 )) || die "Node.js 22 or newer is required (found $(node --version))."
 }
 
+validate_release_tag() {
+  [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "Release tag must use the vMAJOR.MINOR.PATCH format."
+}
+
+resolve_latest_release_tag() {
+  local effective_url tag
+
+  info "Resolving the latest GitHub release..." >&2
+  effective_url="$(
+    curl \
+      --fail \
+      --location \
+      --silent \
+      --show-error \
+      --retry 3 \
+      --retry-delay 1 \
+      --proto '=https' \
+      --tlsv1.2 \
+      --output /dev/null \
+      --write-out '%{url_effective}' \
+      "${GITHUB_URL}/releases/latest"
+  )"
+
+  effective_url="${effective_url%/}"
+  tag="${effective_url##*/}"
+  validate_release_tag "${tag}"
+  printf '%s' "${tag}"
+}
+
+download_file() {
+  local url=$1
+  local destination=$2
+
+  curl \
+    --fail \
+    --location \
+    --silent \
+    --show-error \
+    --retry 3 \
+    --retry-delay 1 \
+    --proto '=https' \
+    --tlsv1.2 \
+    --output "${destination}" \
+    "${url}"
+}
+
+has_local_artifacts() {
+  [[ -f "${SCRIPT_DIRECTORY}/web/index.html" ]] && \
+    [[ -f "${SCRIPT_DIRECTORY}/api/dist/server.js" ]] && \
+    [[ -f "${SCRIPT_DIRECTORY}/api/package.json" ]] && \
+    [[ -f "${SCRIPT_DIRECTORY}/media/screen-share-media" ]] && \
+    [[ -d "${SCRIPT_DIRECTORY}/env" ]] && \
+    [[ -f "${SCRIPT_DIRECTORY}/update.sh" ]]
+}
+
+prepare_release_bundle() {
+  if [[ -z "${RELEASE_TAG}" ]] && has_local_artifacts; then
+    BUNDLE_DIRECTORY="${SCRIPT_DIRECTORY}"
+    if [[ -f "${BUNDLE_DIRECTORY}/VERSION" ]]; then
+      RELEASE_TAG="$(tr -d '\r\n' < "${BUNDLE_DIRECTORY}/VERSION")"
+    else
+      RELEASE_TAG="development"
+    fi
+    info "Using deployment artifacts from ${BUNDLE_DIRECTORY}."
+    return
+  fi
+
+  require_command tar
+  require_command sha256sum
+
+  if [[ -z "${RELEASE_TAG}" ]]; then
+    RELEASE_TAG="$(resolve_latest_release_tag)"
+  else
+    validate_release_tag "${RELEASE_TAG}"
+  fi
+
+  local archive_name checksum_name archive_url checksum_url
+  archive_name="quick-screen-${RELEASE_TAG}-linux-amd64.tar.gz"
+  checksum_name="${archive_name}.sha256"
+  archive_url="${GITHUB_URL}/releases/download/${RELEASE_TAG}/${archive_name}"
+  checksum_url="${GITHUB_URL}/releases/download/${RELEASE_TAG}/${checksum_name}"
+
+  WORK_DIRECTORY="$(mktemp -d -t quick-screen-install.XXXXXXXX)"
+
+  info "Downloading QUICK SCREEN ${RELEASE_TAG}..."
+  download_file "${archive_url}" "${WORK_DIRECTORY}/${archive_name}"
+  download_file "${checksum_url}" "${WORK_DIRECTORY}/${checksum_name}"
+
+  info "Verifying release checksum..."
+  (
+    cd "${WORK_DIRECTORY}"
+    sha256sum --check --strict "${checksum_name}"
+  )
+
+  tar -xzf "${WORK_DIRECTORY}/${archive_name}" -C "${WORK_DIRECTORY}"
+  BUNDLE_DIRECTORY="${WORK_DIRECTORY}/quick-screen"
+
+  [[ -f "${BUNDLE_DIRECTORY}/VERSION" ]] || die "Release bundle does not contain VERSION."
+  local bundled_version
+  bundled_version="$(tr -d '\r\n' < "${BUNDLE_DIRECTORY}/VERSION")"
+  [[ "${bundled_version}" == "${RELEASE_TAG}" ]] || \
+    die "Release bundle version mismatch: expected ${RELEASE_TAG}, found ${bundled_version}."
+
+  ok "Release ${RELEASE_TAG} downloaded and verified."
+}
+
 require_artifacts() {
-  [[ -f "${SCRIPT_DIRECTORY}/web/index.html" ]] || die "Missing artifact: web/index.html"
-  [[ -f "${SCRIPT_DIRECTORY}/api/dist/server.js" ]] || die "Missing artifact: api/dist/server.js"
-  [[ -f "${SCRIPT_DIRECTORY}/api/package.json" ]] || die "Missing artifact: api/package.json"
-  [[ -f "${SCRIPT_DIRECTORY}/media/screen-share-media" ]] || die "Missing artifact: media/screen-share-media"
-  [[ -d "${SCRIPT_DIRECTORY}/env" ]] || die "Missing artifact directory: env"
+  [[ -f "${BUNDLE_DIRECTORY}/web/index.html" ]] || die "Missing artifact: web/index.html"
+  [[ -f "${BUNDLE_DIRECTORY}/api/dist/server.js" ]] || die "Missing artifact: api/dist/server.js"
+  [[ -f "${BUNDLE_DIRECTORY}/api/package.json" ]] || die "Missing artifact: api/package.json"
+  [[ -f "${BUNDLE_DIRECTORY}/media/screen-share-media" ]] || die "Missing artifact: media/screen-share-media"
+  [[ -d "${BUNDLE_DIRECTORY}/env" ]] || die "Missing artifact directory: env"
+  [[ -f "${BUNDLE_DIRECTORY}/update.sh" ]] || die "Missing artifact: update.sh"
+}
+
+trim_whitespace() {
+  local value=$1
+  value="${value//$'\r'/}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value}"
+}
+
+can_prompt() {
+  [[ "${NON_INTERACTIVE}" == false && -r /dev/tty && -w /dev/tty ]]
 }
 
 prompt_required() {
@@ -101,10 +245,11 @@ prompt_required() {
   local current_value=$2
   local value="${current_value}"
 
-  if [[ -z "${value}" && "${NON_INTERACTIVE}" == false && -t 0 ]]; then
-    read -r -p "${label}: " value
+  if [[ -z "${value}" ]] && can_prompt; then
+    read -r -p "${label}: " value </dev/tty
   fi
 
+  value="$(trim_whitespace "${value}")"
   [[ -n "${value}" ]] || die "${label} is required."
   printf '%s' "${value}"
 }
@@ -116,12 +261,14 @@ prompt_with_default() {
   local value="${current_value}"
   local input=""
 
-  if [[ "${NON_INTERACTIVE}" == false && -t 0 ]]; then
-    read -r -p "${label} [${value:-${default_value}}]: " input
+  if can_prompt; then
+    read -r -p "${label} [${value:-${default_value}}]: " input </dev/tty
+    input="$(trim_whitespace "${input}")"
     value="${input:-${value:-${default_value}}}"
   fi
 
-  printf '%s' "${value:-${default_value}}"
+  value="$(trim_whitespace "${value:-${default_value}}")"
+  printf '%s' "${value}"
 }
 
 is_valid_port() {
@@ -172,6 +319,13 @@ validate_configuration() {
   [[ -f "${SSL_KEY}" && -r "${SSL_KEY}" ]] || die "TLS private key is not readable: ${SSL_KEY}"
 }
 
+require_fresh_installation() {
+  if [[ -f "${API_DIRECTORY}/dist/server.js" || -f "${API_ENV:-${ENV_DIRECTORY}/api.env}" || \
+        -f "/etc/systemd/system/${API_SERVICE}.service" ]]; then
+    die "An existing QUICK SCREEN installation was detected. Use ${INSTALL_ROOT}/update.sh to update it."
+  fi
+}
+
 ensure_service_account() {
   if ! getent group "${SERVICE_GROUP}" >/dev/null; then
     groupadd --system "${SERVICE_GROUP}"
@@ -198,7 +352,6 @@ replace_tree() {
 
 secure_service_tree() {
   local directory=$1
-
   chown -R root:"${SERVICE_GROUP}" "${directory}"
   chmod -R g+rX,o-rwx "${directory}"
 }
@@ -207,20 +360,37 @@ install_artifacts() {
   local web_directory="/var/www/${DOMAIN}"
 
   install -d -o root -g root -m 0755 "${web_directory}"
-  replace_tree "${SCRIPT_DIRECTORY}/web" "${web_directory}"
+  replace_tree "${BUNDLE_DIRECTORY}/web" "${web_directory}"
   chown -R root:root "${web_directory}"
   find "${web_directory}" -type d -exec chmod 0755 {} +
   find "${web_directory}" -type f -exec chmod 0644 {} +
 
   install -d -o root -g "${SERVICE_GROUP}" -m 0750 "${API_DIRECTORY}" "${MEDIA_DIRECTORY}" "${ENV_DIRECTORY}"
-  replace_tree "${SCRIPT_DIRECTORY}/api" "${API_DIRECTORY}"
-  replace_tree "${SCRIPT_DIRECTORY}/media" "${MEDIA_DIRECTORY}"
-  replace_tree "${SCRIPT_DIRECTORY}/env" "${ENV_DIRECTORY}"
+  replace_tree "${BUNDLE_DIRECTORY}/api" "${API_DIRECTORY}"
+  replace_tree "${BUNDLE_DIRECTORY}/media" "${MEDIA_DIRECTORY}"
+  replace_tree "${BUNDLE_DIRECTORY}/env" "${ENV_DIRECTORY}"
 
   chmod 0750 "${MEDIA_DIRECTORY}/screen-share-media"
   secure_service_tree "${API_DIRECTORY}"
   secure_service_tree "${MEDIA_DIRECTORY}"
   secure_service_tree "${ENV_DIRECTORY}"
+
+  install -o root -g root -m 0755 "${BUNDLE_DIRECTORY}/update.sh" "${INSTALL_ROOT}/update.sh"
+  if [[ -f "${BUNDLE_DIRECTORY}/install.sh" ]]; then
+    install -o root -g root -m 0755 "${BUNDLE_DIRECTORY}/install.sh" "${INSTALL_ROOT}/install.sh"
+  fi
+  if [[ -f "${BUNDLE_DIRECTORY}/LICENSE" ]]; then
+    install -o root -g root -m 0644 "${BUNDLE_DIRECTORY}/LICENSE" "${INSTALL_ROOT}/LICENSE"
+  fi
+
+  if [[ -f "${BUNDLE_DIRECTORY}/VERSION" ]]; then
+    install -o root -g root -m 0644 "${BUNDLE_DIRECTORY}/VERSION" "${INSTALL_ROOT}/VERSION"
+  else
+    printf '%s\n' "${RELEASE_TAG:-development}" > "${INSTALL_ROOT}/VERSION"
+    chmod 0644 "${INSTALL_ROOT}/VERSION"
+  fi
+
+  ok "Deployment artifacts installed."
 }
 
 install_api_dependencies() {
@@ -233,35 +403,38 @@ install_api_dependencies() {
     --no-fund \
     --package-lock=false
   secure_service_tree "${API_DIRECTORY}"
+  ok "API runtime dependencies installed."
 }
 
 write_environment_files() {
   umask 027
-  cat > "${ENV_DIRECTORY}/api.env" <<EOF
+  cat > "${ENV_DIRECTORY}/api.env" <<EOF_API
 NODE_ENV=production
 PORT=${API_PORT}
 WEB_ORIGIN=https://${DOMAIN}
 MEDIA_ORIGIN=http://127.0.0.1:${MEDIA_PORT}
-EOF
+EOF_API
 
-  cat > "${ENV_DIRECTORY}/media.env" <<EOF
+  cat > "${ENV_DIRECTORY}/media.env" <<EOF_MEDIA
 MEDIA_PORT=${MEDIA_PORT}
 MEDIA_STUN_URLS=
 MEDIA_PUBLIC_IP=${PUBLIC_IPV4}
 MEDIA_ICE_DIAGNOSTICS=false
 MEDIA_UDP_PORT_MIN=${UDP_PORT_MIN}
 MEDIA_UDP_PORT_MAX=${UDP_PORT_MAX}
-EOF
+EOF_MEDIA
 
   chown root:"${SERVICE_GROUP}" "${ENV_DIRECTORY}/api.env" "${ENV_DIRECTORY}/media.env"
   chmod 0640 "${ENV_DIRECTORY}/api.env" "${ENV_DIRECTORY}/media.env"
+  ok "Production environment files written."
 }
 
 write_systemd_units() {
-  cat > "/etc/systemd/system/${API_SERVICE}.service" <<EOF
+  cat > "/etc/systemd/system/${API_SERVICE}.service" <<EOF_API_SERVICE
 [Unit]
-Description=iNGAMERS Screen Share API
-After=network.target
+Description=QUICK SCREEN API
+After=network-online.target ${MEDIA_SERVICE}.service
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -277,12 +450,13 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF_API_SERVICE
 
-  cat > "/etc/systemd/system/${MEDIA_SERVICE}.service" <<EOF
+  cat > "/etc/systemd/system/${MEDIA_SERVICE}.service" <<EOF_MEDIA_SERVICE
 [Unit]
-Description=iNGAMERS Screen Share Media
-After=network.target
+Description=QUICK SCREEN Media
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -298,9 +472,10 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF_MEDIA_SERVICE
 
   chmod 0644 "/etc/systemd/system/${API_SERVICE}.service" "/etc/systemd/system/${MEDIA_SERVICE}.service"
+  ok "systemd services written."
 }
 
 write_nginx_vhost() {
@@ -310,7 +485,7 @@ write_nginx_vhost() {
 
   [[ ! -e "${enabled_path}" || -L "${enabled_path}" ]] || die "Refusing to replace non-symlink nginx site: ${enabled_path}"
 
-  cat > "${vhost_path}" <<EOF
+  cat > "${vhost_path}" <<EOF_NGINX
 server {
     listen 80;
     listen [::]:80;
@@ -354,11 +529,12 @@ server {
         try_files \$uri \$uri/ /index.html;
     }
 }
-EOF
+EOF_NGINX
 
   ln -sfn "../sites-available/${DOMAIN}" "${enabled_path}"
   nginx -t
   systemctl reload nginx
+  ok "Nginx virtual host enabled."
 }
 
 wait_for_health() {
@@ -368,7 +544,7 @@ wait_for_health() {
 
   for attempt in $(seq 1 15); do
     if curl --fail --silent --show-error --max-time 5 "${url}" >/dev/null; then
-      printf '%s health check passed.\n' "${name}"
+      ok "${name} health check passed."
       return
     fi
     sleep 1
@@ -378,21 +554,27 @@ wait_for_health() {
 }
 
 show_summary() {
-  printf '\nInstallation complete.\n'
+  local installed_version="unknown"
+  [[ -f "${INSTALL_ROOT}/VERSION" ]] && installed_version="$(tr -d '\r\n' < "${INSTALL_ROOT}/VERSION")"
+
+  printf '\nQUICK SCREEN installation complete.\n'
+  printf 'Version: %s\n' "${installed_version}"
   printf 'URL: https://%s\n' "${DOMAIN}"
   printf 'API service: %s\n' "$(systemctl is-active "${API_SERVICE}" || true)"
   printf 'Media service: %s\n' "$(systemctl is-active "${MEDIA_SERVICE}" || true)"
   printf 'Pion UDP range: %s-%s\n' "${UDP_PORT_MIN}" "${UDP_PORT_MAX}"
+  printf 'Updater: %s/update.sh\n' "${INSTALL_ROOT}"
   printf '\nLogs:\n'
   printf '  journalctl -u %s -f\n' "${API_SERVICE}"
   printf '  journalctl -u %s -f\n' "${MEDIA_SERVICE}"
-  printf '\nAllow UDP %s-%s in your VPS provider network rules and firewall. This installer does not modify firewall rules.\n' \
+  printf '\nUDP %s-%s must be allowed in the VPS/provider firewall. The installer does not modify firewall rules.\n' \
     "${UDP_PORT_MIN}" "${UDP_PORT_MAX}"
 }
 
 parse_arguments() {
   while (($# > 0)); do
     case "$1" in
+      --version) RELEASE_TAG=${2:-}; shift 2 ;;
       --domain) DOMAIN=${2:-}; shift 2 ;;
       --public-ip) PUBLIC_IPV4=${2:-}; shift 2 ;;
       --ssl-cert) SSL_CERT=${2:-}; shift 2 ;;
@@ -412,11 +594,14 @@ main() {
   parse_arguments "$@"
   require_root
   require_supported_platform
+  require_command curl
   require_command nginx
   require_command systemctl
-  require_command curl
   require_command getent
+  require_command mktemp
   require_node
+  require_fresh_installation
+  prepare_release_bundle
   require_artifacts
 
   DOMAIN="$(prompt_required "Domain" "${DOMAIN}")"
