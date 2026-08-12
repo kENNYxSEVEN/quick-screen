@@ -14,6 +14,18 @@ import {
 import { ScreenContext } from "@/providers/screen-context";
 import type { StartSharingOptions } from "@/types/screen";
 
+type DisplayMediaOptionsWithAudioPreferences = DisplayMediaStreamOptions & {
+  systemAudio?: "include" | "exclude";
+  windowAudio?: "system" | "window" | "exclude";
+};
+
+const DISPLAY_MEDIA_OPTIONS: DisplayMediaOptionsWithAudioPreferences = {
+  video: true,
+  audio: true,
+  systemAudio: "include",
+  windowAudio: "window",
+};
+
 function attachEndedListener(
   mediaStream: MediaStream,
   roomId: string,
@@ -105,10 +117,9 @@ export function ScreenProvider({ children }: PropsWithChildren) {
     try {
       setShareError(null);
 
-      const mediaStream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: true,
-      });
+      const mediaStream = await navigator.mediaDevices.getDisplayMedia(
+        DISPLAY_MEDIA_OPTIONS,
+      );
       await applyStoredVideoSettings(mediaStream);
       const id = options.roomId;
 
@@ -162,10 +173,9 @@ export function ScreenProvider({ children }: PropsWithChildren) {
     try {
       setShareError(null);
 
-      const nextStream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: true,
-      });
+      const nextStream = await navigator.mediaDevices.getDisplayMedia(
+        DISPLAY_MEDIA_OPTIONS,
+      );
       await applyStoredVideoSettings(nextStream);
 
       attachEndedListener(
