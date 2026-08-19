@@ -388,16 +388,40 @@ export async function createPublisher(
       videoTracks: tracks.video.map((track) => track.id),
       audioTracks: tracks.audio.map((track) => track.id),
     });
-    const senders: Record<MediaKind, RTCRtpSender[]> = {
-      video: [],
-      audio: [],
-    };
-
-    for (const kind of mediaKinds) {
-      for (const track of tracks[kind]) {
-        senders[kind].push(peerConnection.addTrack(track, stream));
-      }
+    if (tracks.video.length !== 1 || tracks.audio.length > 1) {
+      throw new Error(
+        "Screen sharing requires exactly one video track and at most one audio track.",
+      );
     }
+
+    // Keep the publisher SDP topology stable for the lifetime of this
+    // PeerConnection: one video m-line and one audio m-line are negotiated
+    // even when the selected source currently has no audio.
+    //
+    // This lets source switching use RTCRtpSender.replaceTrack() for:
+    //   video + audio -> video only   (audio sender -> null)
+    //   video only    -> video + audio (null -> audio track)
+    //
+    // No publisher renegotiation is needed merely because source audio
+    // appears or disappears.
+    const videoTransceiver = peerConnection.addTransceiver("video", {
+      direction: "sendonly",
+    });
+    const audioTransceiver = peerConnection.addTransceiver("audio", {
+      direction: "sendonly",
+    });
+
+    await Promise.all([
+      videoTransceiver.sender.replaceTrack(tracks.video[0]),
+      audioTransceiver.sender.replaceTrack(tracks.audio[0] ?? null),
+    ]);
+
+    const senders: Record<MediaKind, RTCRtpSender[]> = {
+      video: [videoTransceiver.sender],
+      audio: [audioTransceiver.sender],
+    };
+    let isPaused = false;
+
     const offer = await createOffer(peerConnection, "host");
     const answer = await publishRoomMedia(roomId, offer);
 
@@ -408,22 +432,59 @@ export async function createPublisher(
       async replaceTracks(nextStream) {
         const nextTracks = getMediaTracks(nextStream);
 
-        for (const kind of mediaKinds) {
-          if (senders[kind].length !== nextTracks[kind].length) {
-            throw new Error("The selected source changed its available media tracks.");
-          }
+        if (nextTracks.video.length !== 1 || nextTracks.audio.length > 1) {
+          throw new Error(
+            "The selected source has an unsupported media track layout.",
+          );
         }
 
+        const videoSender = senders.video[0];
+        const audioSender = senders.audio[0];
+
+        if (!videoSender || !audioSender) {
+          throw new Error("The publisher media senders are unavailable.");
+        }
+
+        const nextVideoTrack = nextTracks.video[0];
+        const nextAudioTrack = nextTracks.audio[0] ?? null;
+
         logWebRtc("host publisher replacing media tracks", {
-          videoTracks: nextTracks.video.map((track) => track.id),
-          audioTracks: nextTracks.audio.map((track) => track.id),
+          videoTracks: [nextVideoTrack.id],
+          audioTracks: nextAudioTrack ? [nextAudioTrack.id] : [],
+          audioMode: nextAudioTrack ? "source" : "none",
         });
 
-        await Promise.all(
-          mediaKinds.flatMap((kind) =>
-            senders[kind].map((sender, index) => sender.replaceTrack(nextTracks[kind][index])),
-          ),
-        );
+        await Promise.all([
+          videoSender.replaceTrack(nextVideoTrack),
+          audioSender.replaceTrack(nextAudioTrack),
+        ]);
+
+        // setPaused() skips senders that currently have no track. If a source
+        // switch attaches a new audio track while the room is paused, apply
+        // the existing pause state to that newly active sender immediately.
+        if (isPaused) {
+          const activeSenders = [videoSender, audioSender].filter(
+            (sender) => sender.track !== null,
+          );
+
+          await Promise.all(
+            activeSenders.map(async (sender) => {
+              const parameters = sender.getParameters();
+
+              if (parameters.encodings.length === 0) {
+                throw new Error(
+                  "The media sender does not expose encoding parameters.",
+                );
+              }
+
+              for (const encoding of parameters.encodings) {
+                encoding.active = false;
+              }
+
+              await sender.setParameters(parameters);
+            }),
+          );
+        }
       },
       async setBitrate(maxBitrate) {
         if (senders.video.length === 0) {
@@ -452,7 +513,13 @@ export async function createPublisher(
         });
       },
       async setPaused(paused) {
-        const activeSenders = mediaKinds.flatMap((kind) => senders[kind]);
+        isPaused = paused;
+
+        // A fixed audio sender can intentionally have track=null for a
+        // source without shared audio. Do not treat that as an error.
+        const activeSenders = mediaKinds
+          .flatMap((kind) => senders[kind])
+          .filter((sender) => sender.track !== null);
 
         await Promise.all(
           activeSenders.map(async (sender) => {
@@ -474,6 +541,7 @@ export async function createPublisher(
           roomId,
           paused,
           senderCount: activeSenders.length,
+          hasAudioTrack: senders.audio[0]?.track !== null,
         });
       },
       close() {

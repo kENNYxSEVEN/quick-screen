@@ -5,6 +5,7 @@ import {
   Maximize2,
   Minimize2,
   MonitorUp,
+  Pause,
   Volume2,
   VolumeX,
 } from "lucide-react";
@@ -102,6 +103,8 @@ export function ViewerPlayer({
   isStreamPaused,
 }: ViewerPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const reconnectSnapshotRef = useRef<HTMLCanvasElement>(null);
+  const [hasReconnectSnapshot, setHasReconnectSnapshot] = useState(false);
   const [volume, setVolume] = useState(getStoredViewerVolume);
   const [isMuted, setIsMuted] = useState(false);
   const volumeRef = useRef(volume);
@@ -113,15 +116,17 @@ export function ViewerPlayer({
       description: "The host ended this sharing session.",
     }
     : viewerStateDetails[state];
-  const isConnecting = state === "connecting";
   const isWatching = stream !== null && state === "watching";
+  const isDisplayingStream =
+    stream !== null && (state === "watching" || state === "connecting");
+  const isReconnecting = stream !== null && state === "connecting";
   const hasAudio = stream?.getAudioTracks().some((track) => track.readyState === "live") ?? false;
   const {
     containerRef,
     isFullscreen,
     isFullscreenSupported,
     toggleFullscreen,
-  } = useFullscreen(isWatching);
+  } = useFullscreen(isDisplayingStream);
   const {
     controlsRef,
     areControlsVisible,
@@ -295,6 +300,77 @@ export function ViewerPlayer({
   }, [hasAudio]);
 
   useEffect(() => {
+    if (!isReconnecting) {
+      if (state === "watching") {
+        setHasReconnectSnapshot(false);
+      }
+
+      return;
+    }
+
+    const video = videoRef.current;
+    const canvas = reconnectSnapshotRef.current;
+    const container = containerRef.current;
+
+    if (
+      !video ||
+      !canvas ||
+      !container ||
+      video.videoWidth <= 0 ||
+      video.videoHeight <= 0
+    ) {
+      setHasReconnectSnapshot(false);
+
+      return;
+    }
+
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      setHasReconnectSnapshot(false);
+
+      return;
+    }
+
+    const bounds = container.getBoundingClientRect();
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const canvasWidth = Math.max(1, Math.round(bounds.width * pixelRatio));
+    const canvasHeight = Math.max(1, Math.round(bounds.height * pixelRatio));
+
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+
+    context.fillStyle = "#000";
+    context.fillRect(0, 0, canvasWidth, canvasHeight);
+
+    const scale = Math.min(
+      canvasWidth / video.videoWidth,
+      canvasHeight / video.videoHeight,
+    );
+    const drawWidth = video.videoWidth * scale;
+    const drawHeight = video.videoHeight * scale;
+    const offsetX = (canvasWidth - drawWidth) / 2;
+    const offsetY = (canvasHeight - drawHeight) / 2;
+
+    try {
+      context.drawImage(
+        video,
+        offsetX,
+        offsetY,
+        drawWidth,
+        drawHeight,
+      );
+      setHasReconnectSnapshot(true);
+    } catch (error) {
+      setHasReconnectSnapshot(false);
+
+      if (import.meta.env.DEV) {
+        console.warn("[webrtc] viewer could not preserve reconnect frame", error);
+      }
+    }
+  }, [containerRef, isReconnecting, state]);
+
+  useEffect(() => {
     if (!isWatching || !hasAudio) {
       return;
     }
@@ -322,9 +398,9 @@ export function ViewerPlayer({
     };
   }, [hasAudio, isWatching, toggleSound]);
 
-  if (stream && state === "watching") {
+  if (isDisplayingStream) {
     return (
-      <Card className="min-w-0 gap-0 overflow-hidden bg-black/25 p-0 ring-white/10">
+      <Card className="min-w-0 gap-0 overflow-hidden bg-black/25 p-0 shadow-[0_22px_70px_rgba(0,0,0,0.24)] ring-white/10">
         <div className="relative w-full overflow-hidden bg-black">
           <div className="w-full pb-[56.25%]" aria-hidden="true" />
 
@@ -347,16 +423,55 @@ export function ViewerPlayer({
               aria-label="Shared screen"
             />
 
-            {isStreamPaused && (
-              <div className="pointer-events-none absolute inset-0 z-[1] flex items-center justify-center bg-black/55 px-6 text-center backdrop-blur-[1px]">
-                <div>
-                  <p className="text-lg font-semibold text-white">Stream paused</p>
-                  <p className="mt-1 text-sm text-zinc-300">The host has paused sharing.</p>
+            {state === "watching" && isStreamPaused && (
+              <div className="pointer-events-none absolute inset-0 z-[1] flex items-center justify-center bg-black/65 px-6 text-center">
+                <div className="w-full max-w-[320px] rounded-xl border border-white/[0.08] bg-[#141414]/95 px-6 py-5">
+                  <span className="mx-auto flex size-9 items-center justify-center rounded-lg border border-white/[0.09] bg-white/[0.025] text-zinc-400">
+                    <Pause className="size-4" aria-hidden="true" />
+                  </span>
+
+                  <p className="mt-3 text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+                    Stream paused
+                  </p>
+
+                  <p className="mt-1.5 text-sm font-medium text-zinc-100">
+                    The host paused sharing
+                  </p>
+
+                  <p className="mt-2 text-xs leading-5 text-zinc-400">
+                    Playback will resume automatically.
+                  </p>
                 </div>
               </div>
             )}
 
-            <div
+            {isReconnecting && (
+              <>
+                <canvas
+                  ref={reconnectSnapshotRef}
+                  className={cn(
+                    "pointer-events-none absolute inset-0 z-[1] h-full w-full",
+                    hasReconnectSnapshot ? "opacity-100" : "opacity-0",
+                  )}
+                  aria-hidden="true"
+                />
+
+                <div className="pointer-events-none absolute inset-0 z-[2] flex items-center justify-center bg-black/25 px-6">
+                  <div className="flex items-center gap-2.5 rounded-lg border border-white/[0.09] bg-[#141414]/95 px-3.5 py-2.5 shadow-lg backdrop-blur-[2px]">
+                    <LoaderCircle
+                      className="size-3.5 animate-spin text-zinc-400"
+                      aria-hidden="true"
+                    />
+                    <span className="text-xs font-medium text-zinc-200">
+                      Reconnecting…
+                    </span>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {state === "watching" && (
+              <div
               ref={controlsRef}
               className={cn(
                 "absolute bottom-5 right-4 z-10 flex items-center gap-1 transition-opacity duration-200 sm:bottom-5 sm:right-5",
@@ -440,7 +555,8 @@ export function ViewerPlayer({
                   )}
                 </Button>
               )}
-            </div>
+              </div>
+            )}
           </div>
         </div>
       </Card>
@@ -448,32 +564,95 @@ export function ViewerPlayer({
   }
 
   return (
-    <Card className="min-w-0 gap-0 overflow-hidden bg-black/25 p-0 ring-white/10">
-      <div className="relative w-full overflow-hidden bg-zinc-950">
+    <Card className="min-w-0 gap-0 overflow-hidden bg-black/25 p-0 shadow-[0_22px_70px_rgba(0,0,0,0.24)] ring-white/10">
+      <div className="relative w-full overflow-hidden bg-[#060606]">
         <div className="w-full pb-[56.25%]" aria-hidden="true" />
 
         <div className="absolute inset-0 flex items-center justify-center px-6 text-center">
-          <div
-            className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.035),transparent_55%)]"
-            aria-hidden="true"
-          />
+          {state === "waiting" && !isRoomEnded ? (
+            <div
+              className="w-full max-w-[360px] rounded-xl border border-white/[0.07] bg-[#121212] px-7 py-6"
+              aria-live="polite"
+            >
+              <span className="mx-auto flex size-9 items-center justify-center rounded-lg border border-white/[0.09] bg-white/[0.025] text-zinc-400">
+                <MonitorUp className="size-4" aria-hidden="true" />
+              </span>
 
-          <div className="relative z-10 max-w-sm" aria-live="polite">
-            <span className="mx-auto flex size-11 items-center justify-center rounded-xl border border-white/10 bg-white/[0.05] text-zinc-300">
-              <Icon
-                className={isConnecting ? "size-5 animate-spin" : "size-5"}
-                aria-hidden="true"
-              />
-            </span>
+              <p className="mt-3 text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+                Waiting for host
+              </p>
 
-            <h1 className="mt-4 text-xl font-semibold tracking-tight text-white sm:text-2xl">
-              {title}
-            </h1>
+              <h1 className="mt-1.5 text-base font-semibold text-zinc-100">
+                No stream yet
+              </h1>
 
-            <p className="mt-2 text-sm leading-6 text-zinc-500">
-              {description}
-            </p>
-          </div>
+              <p className="mt-2 text-xs leading-5 text-zinc-400">
+                Keep this page open. The stream will appear automatically.
+              </p>
+            </div>
+          ) : state === "connecting" && !isRoomEnded ? (
+            <div
+              className="w-full max-w-[360px] rounded-xl border border-white/[0.07] bg-[#121212] px-7 py-6"
+              aria-live="polite"
+            >
+              <span className="mx-auto flex size-9 items-center justify-center rounded-lg border border-sky-300/10 bg-sky-300/[0.025] text-sky-200/70">
+                <LoaderCircle
+                  className="size-4 animate-spin"
+                  aria-hidden="true"
+                />
+              </span>
+
+              <p className="mt-3 text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+                Connecting
+              </p>
+
+              <h1 className="mt-1.5 text-base font-semibold text-zinc-100">
+                Establishing connection
+              </h1>
+
+              <p className="mt-2 text-xs leading-5 text-zinc-400">
+                Setting up the stream. This should only take a moment.
+              </p>
+            </div>
+          ) : state === "disconnected" && !isRoomEnded ? (
+            <div
+              className="w-full max-w-[360px] rounded-xl border border-white/[0.07] bg-[#121212] px-7 py-6"
+              aria-live="polite"
+            >
+              <span className="mx-auto flex size-9 items-center justify-center rounded-lg border border-red-400/10 bg-red-400/[0.035] text-red-300/75">
+                <CircleAlert className="size-4" aria-hidden="true" />
+              </span>
+
+              <p className="mt-3 text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+                Connection lost
+              </p>
+
+              <h1 className="mt-1.5 text-base font-semibold text-zinc-100">
+                Stream unavailable
+              </h1>
+
+              <p className="mt-2 text-xs leading-5 text-zinc-400">
+                The host may have stopped sharing or the connection was interrupted.
+              </p>
+            </div>
+          ) : (
+            <div
+              className="w-full max-w-[360px] rounded-xl border border-white/[0.07] bg-[#121212] px-7 py-6"
+              aria-live="polite"
+            >
+              <span className="mx-auto flex size-9 items-center justify-center rounded-lg border border-white/[0.09] bg-white/[0.025] text-zinc-400">
+                <Icon className="size-4" aria-hidden="true" />
+              </span>
+
+              <h1 className="mt-3 text-base font-semibold text-zinc-100">
+                {title}
+              </h1>
+
+              <p className="mt-2 text-xs leading-5 text-zinc-400">
+                {description}
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </Card>

@@ -1,8 +1,8 @@
 import { ArrowLeft, SearchX } from "lucide-react";
 import { Link } from "react-router-dom";
 
-import { Brand } from "@/components/brand";
 import { Button } from "@/components/ui/button";
+import { DashboardLayout } from "@/layouts/dashboard-layout";
 
 interface NotFoundProps {
   title?: string;
@@ -14,24 +14,41 @@ export function NotFound({
   description = "The link may be incomplete, or the page may have moved.",
 }: NotFoundProps) {
   return (
-    <main className="flex min-h-svh flex-col bg-zinc-950 px-6 py-6 text-white">
-      <header className="mx-auto flex w-full max-w-6xl items-center justify-between">
-        <Brand />
-      </header>
-      <section className="mx-auto flex w-full max-w-xl flex-1 flex-col items-center justify-center text-center">
-        <span className="flex size-12 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] text-zinc-300">
-          <SearchX className="size-5" aria-hidden="true" />
-        </span>
-        <p className="mt-6 text-sm font-medium text-zinc-400">404</p>
-        <h1 className="mt-2 text-3xl font-semibold tracking-tight">{title}</h1>
-        <p className="mt-3 text-sm leading-6 text-zinc-500">
-          {description}
-        </p>
-        <Button className="mt-7 h-10 px-4" render={<Link to="/" />}>
-          <ArrowLeft className="size-4" aria-hidden="true" />
-          Back home
-        </Button>
-      </section>
-    </main>
+    <DashboardLayout showGrid>
+      <div className="flex min-h-[calc(100svh-10rem)] items-center justify-center py-8">
+        <div className="w-full max-w-[360px] sm:-translate-y-5">
+          <div className="rounded-xl border border-white/[0.07] bg-[#121212] px-7 py-6">
+            <div className="text-center">
+              <span className="mx-auto flex size-9 items-center justify-center rounded-lg border border-white/[0.09] bg-white/[0.025] text-zinc-400">
+                <SearchX className="size-4" aria-hidden="true" />
+              </span>
+
+              <p className="mt-3 text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+                404
+              </p>
+
+              <h1 className="mt-1.5 text-[1.375rem] font-semibold leading-none tracking-[-0.025em] text-zinc-50">
+                {title}
+              </h1>
+
+              <p className="mx-auto mt-3 max-w-[270px] text-xs leading-5 text-zinc-400">
+                {description}
+              </p>
+            </div>
+
+            <div className="mx-auto mt-5 w-full max-w-[280px]">
+              <Button
+                size="lg"
+                className="h-11 w-full rounded-lg bg-zinc-100 px-4 text-zinc-950 hover:bg-white"
+                render={<Link to="/" />}
+              >
+                <ArrowLeft className="size-4" aria-hidden="true" />
+                Back home
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </DashboardLayout>
   );
 }

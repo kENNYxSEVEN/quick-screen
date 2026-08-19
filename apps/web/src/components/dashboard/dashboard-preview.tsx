@@ -10,14 +10,16 @@ import { cn } from "@/lib/utils";
 
 interface DashboardPreviewProps {
   stream: MediaStream | null;
-  errorMessage: string | null;
   isLive: boolean;
+  isSelectingScreen: boolean;
+  onSelectScreen: () => void;
 }
 
 export function DashboardPreview({
   stream,
-  errorMessage,
   isLive,
+  isSelectingScreen,
+  onSelectScreen,
 }: DashboardPreviewProps) {
   const {
     containerRef,
@@ -35,13 +37,12 @@ export function DashboardPreview({
   } = usePlayerControls(stream !== null, isFullscreen);
 
   return (
-    <Card className="gap-0 overflow-visible bg-white/[0.03] p-3 ring-white/10 sm:p-4">
+    <Card className="gap-0 overflow-visible rounded-xl bg-[#121212] p-2.5 shadow-[0_22px_70px_rgba(0,0,0,0.24)] ring-white/[0.08] sm:p-3">
       <div
         ref={containerRef}
         className={cn(
-          "group/preview relative aspect-video w-full overflow-hidden rounded-xl bg-black",
-          isFullscreen &&
-            "h-screen w-screen max-w-none rounded-none",
+          "group/preview relative aspect-video w-full overflow-hidden rounded-lg bg-black ring-1 ring-white/[0.05]",
+          isFullscreen && "h-screen w-screen max-w-none rounded-none ring-0",
           !areControlsVisible && "cursor-none",
         )}
         onPointerEnter={showControls}
@@ -55,6 +56,8 @@ export function DashboardPreview({
         <div className="absolute inset-0">
           <ScreenPreview
             stream={stream}
+            isSelectingScreen={isSelectingScreen}
+            onSelectScreen={onSelectScreen}
             className={cn(
               "h-full w-full max-w-none rounded-none object-contain",
               isFullscreen && "max-w-none",
@@ -66,7 +69,7 @@ export function DashboardPreview({
           <div
             ref={controlsRef}
             className={cn(
-              "absolute bottom-3 right-3 z-10 flex items-center gap-1 transition-opacity duration-200 sm:bottom-4 sm:right-4",
+              "absolute bottom-3 right-3 z-10 flex items-center gap-1.5 transition-opacity duration-200 sm:bottom-4 sm:right-4",
               areControlsVisible
                 ? "opacity-100"
                 : "pointer-events-none opacity-0",
@@ -85,7 +88,7 @@ export function DashboardPreview({
                 size="icon-lg"
                 onClick={() => void toggleFullscreen()}
                 onDoubleClick={(event) => event.stopPropagation()}
-                className="border-white/15 bg-black/65 text-white shadow-lg backdrop-blur-sm hover:bg-black/80"
+                className="border-white/[0.12] bg-black/60 text-zinc-200 shadow-lg backdrop-blur-md hover:bg-black/80 hover:text-white"
                 aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
                 title={`${isFullscreen ? "Exit fullscreen" : "Enter fullscreen"} (F)`}
               >
@@ -99,14 +102,6 @@ export function DashboardPreview({
           </div>
         )}
 
-        {!stream && errorMessage && (
-          <p
-            className="absolute bottom-4 left-1/2 max-w-[calc(100%-2rem)] -translate-x-1/2 rounded-md border border-red-400/15 bg-red-400/10 px-3 py-2 text-center text-xs text-red-300 backdrop-blur-sm"
-            role="alert"
-          >
-            {errorMessage}
-          </p>
-        )}
       </div>
     </Card>
   );

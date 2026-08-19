@@ -2,6 +2,7 @@ import { Check, Copy, Eye, Link2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 interface DashboardInfoProps {
   roomUrl: string;
@@ -55,30 +56,54 @@ export function DashboardInfo({ roomUrl, viewerCount }: DashboardInfoProps) {
   }[copyStatus];
 
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
-      <div className="flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.025] px-2.5 text-sm text-zinc-300">
-        <Eye className="size-3.5 text-zinc-500" aria-hidden="true" />
-        <span className="font-medium text-white">{viewerCount}</span>
-        <span className="hidden text-zinc-500 sm:inline">viewers</span>
+    <div className="flex min-w-0 flex-1 items-center gap-2">
+      <div className="flex h-9 shrink-0 items-center gap-2 rounded-lg border border-white/[0.09] bg-white/[0.025] px-3 text-sm text-zinc-400">
+        <Eye className="size-3.5" aria-hidden="true" />
+        <span className="font-medium tabular-nums text-zinc-100">
+          {viewerCount}
+        </span>
+        <span className="hidden sm:inline">
+          {viewerCount === 1 ? "viewer" : "viewers"}
+        </span>
       </div>
 
       <div
-        className="flex h-8 min-w-0 flex-1 items-center overflow-hidden rounded-md border border-white/10 bg-white/[0.025] text-sm text-zinc-400"
-        title={roomUrl}
+        className="flex h-9 min-w-0 flex-1 items-center overflow-hidden rounded-lg border border-white/[0.09] bg-[#0a0a0a] text-sm transition-colors hover:border-white/[0.13]"
+        title={copyLabel}
       >
-        <div className="flex min-w-0 flex-1 items-center gap-2 px-2.5">
-          <Link2 className="size-3.5 shrink-0 text-zinc-500" aria-hidden="true" />
-          <span className="truncate font-mono text-xs">{roomUrl}</span>
-        </div>
+        <button
+          type="button"
+          onClick={() => void copyLink()}
+          className="group/link flex h-full min-w-0 flex-1 items-center gap-2.5 px-3 text-left outline-none transition-colors hover:bg-white/[0.025] focus-visible:bg-white/[0.04]"
+          aria-label={copyLabel}
+        >
+          <Link2
+            className={cn(
+              "size-3.5 shrink-0 text-zinc-400 transition-colors group-hover/link:text-zinc-400",
+              copyStatus === "copied" && "text-emerald-400",
+            )}
+            aria-hidden="true"
+          />
 
-        <div className="h-4 w-px shrink-0 bg-white/10" aria-hidden="true" />
+          <span
+            className={cn(
+              "truncate font-mono text-xs text-zinc-300 transition-colors group-hover/link:text-zinc-100",
+              copyStatus === "copied" && "text-emerald-300",
+              copyStatus === "failed" && "text-red-300",
+            )}
+          >
+            {copyStatus === "copied" ? "Copied" : roomUrl}
+          </span>
+        </button>
+
+        <div className="h-4 w-px shrink-0 bg-white/[0.08]" aria-hidden="true" />
 
         <Button
           type="button"
           variant="ghost"
           size="icon"
           onClick={() => void copyLink()}
-          className="h-8 w-9 shrink-0 rounded-none text-zinc-400 hover:bg-white/[0.07] hover:text-white"
+          className="h-9 w-10 shrink-0 rounded-none text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-200"
           aria-label={copyLabel}
           title={copyLabel}
         >
