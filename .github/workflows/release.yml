@@ -51,6 +51,10 @@ jobs:
         run: pnpm lint
 
       - name: Build deployment bundle
+        env:
+          # The Git tag is the single source of truth for the UI/release version.
+          # Example: tag v0.2.0 -> header shows v0.2.0.
+          VITE_APP_VERSION: ${{ github.ref_name }}
         run: pnpm build:deploy
 
       - name: Package release archive
