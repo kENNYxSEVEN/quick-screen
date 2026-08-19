@@ -58,6 +58,40 @@ async function applyStoredVideoSettings(mediaStream: MediaStream) {
   }
 }
 
+function isScreenPickerCancellation(error: unknown) {
+  return (
+    error instanceof DOMException &&
+    (error.name === "NotAllowedError" || error.name === "AbortError")
+  );
+}
+
+function getScreenCaptureErrorMessage(
+  error: unknown,
+  action: "start" | "change",
+) {
+  if (error instanceof DOMException) {
+    switch (error.name) {
+      case "NotFoundError":
+        return "No screen, window, or browser tab is available to share.";
+
+      case "NotReadableError":
+        return action === "start"
+          ? "The selected screen could not be captured. Please try another source."
+          : "The selected source could not be captured. Your current stream is unchanged.";
+
+      case "InvalidStateError":
+        return "Screen sharing could not start from the current browser state. Please try again.";
+
+      case "OverconstrainedError":
+        return "The selected source does not support the requested capture settings.";
+    }
+  }
+
+  return action === "start"
+    ? "Screen sharing could not be started. Please try again."
+    : "The screen source could not be changed. Your current stream is unchanged.";
+}
+
 export function ScreenProvider({ children }: PropsWithChildren) {
   const [roomId, setRoomId] = useState<string | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
@@ -65,6 +99,7 @@ export function ScreenProvider({ children }: PropsWithChildren) {
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [shareError, setShareError] = useState<string | null>(null);
   const activeStreamRef = useRef<MediaStream | null>(null);
+  const pendingStreamRef = useRef<MediaStream | null>(null);
   const activeRoomIdRef = useRef<string | null>(null);
   const activeOnSystemEndedRef = useRef<((roomId: string) => void) | undefined>(undefined);
   const intentionallyStoppedStreamsRef = useRef(new WeakSet<MediaStream>());
@@ -85,6 +120,10 @@ export function ScreenProvider({ children }: PropsWithChildren) {
 
   const stopSharing = useCallback(() => {
     const activeStream = activeStreamRef.current;
+    const pendingStream = pendingStreamRef.current;
+
+    pendingStreamRef.current = null;
+    pendingStream?.getTracks().forEach((track) => track.stop());
 
     if (activeStream) {
       intentionallyStoppedStreamsRef.current.add(activeStream);
@@ -139,8 +178,27 @@ export function ScreenProvider({ children }: PropsWithChildren) {
       setStartedAt(Date.now());
 
       return mediaStream;
-    } catch {
-      setShareError("Screen sharing was cancelled or could not be started.");
+    } catch (error) {
+      if (isScreenPickerCancellation(error)) {
+        // Closing/denying the native picker is treated as a user cancellation,
+        // not as an application error.
+        setShareError(null);
+
+        if (import.meta.env.DEV) {
+          console.info("[screen] screen picker dismissed", {
+            errorName: error instanceof DOMException ? error.name : undefined,
+          });
+        }
+
+        return null;
+      }
+
+      setShareError(getScreenCaptureErrorMessage(error, "start"));
+
+      if (import.meta.env.DEV) {
+        console.warn("[screen] screen capture could not be started", error);
+      }
+
       return null;
     } finally {
       isRequestingScreenRef.current = false;
@@ -151,7 +209,11 @@ export function ScreenProvider({ children }: PropsWithChildren) {
   const changeSource = useCallback(async (): Promise<MediaStream | null> => {
     const previousStream = activeStreamRef.current;
 
-    if (isRequestingScreenRef.current || !previousStream) {
+    if (
+      isRequestingScreenRef.current ||
+      pendingStreamRef.current ||
+      !previousStream
+    ) {
       return null;
     }
 
@@ -161,7 +223,6 @@ export function ScreenProvider({ children }: PropsWithChildren) {
     }
 
     const currentRoomId = activeRoomIdRef.current;
-    const currentStartedAt = startedAt;
 
     if (!currentRoomId) {
       return null;
@@ -178,6 +239,79 @@ export function ScreenProvider({ children }: PropsWithChildren) {
       );
       await applyStoredVideoSettings(nextStream);
 
+      // The existing capture may have ended while the picker was open.
+      // In that case the candidate no longer belongs to an active session.
+      if (
+        activeStreamRef.current !== previousStream ||
+        activeRoomIdRef.current !== currentRoomId
+      ) {
+        nextStream.getTracks().forEach((track) => track.stop());
+
+        return null;
+      }
+
+      if (nextStream.getVideoTracks()[0]?.readyState !== "live") {
+        nextStream.getTracks().forEach((track) => track.stop());
+        setShareError(
+          "The selected source ended before it could replace your current stream.",
+        );
+
+        return null;
+      }
+
+      // Important: do NOT touch the current capture yet. The caller first
+      // switches the WebRTC publisher and only then calls commitSource().
+      pendingStreamRef.current = nextStream;
+
+      return nextStream;
+    } catch (error) {
+      if (isScreenPickerCancellation(error)) {
+        // Keep the existing stream untouched when the source picker is closed.
+        setShareError(null);
+
+        if (import.meta.env.DEV) {
+          console.info("[screen] source picker dismissed", {
+            errorName: error instanceof DOMException ? error.name : undefined,
+          });
+        }
+
+        return null;
+      }
+
+      setShareError(getScreenCaptureErrorMessage(error, "change"));
+
+      if (import.meta.env.DEV) {
+        console.warn("[screen] screen source could not be changed", error);
+      }
+
+      return null;
+    } finally {
+      isRequestingScreenRef.current = false;
+      setIsRequestingScreen(false);
+    }
+  }, []);
+
+  const commitSource = useCallback(
+    (nextStream: MediaStream) => {
+      if (pendingStreamRef.current !== nextStream) {
+        throw new Error("The selected screen source is no longer pending.");
+      }
+
+      const previousStream = activeStreamRef.current;
+      const currentRoomId = activeRoomIdRef.current;
+
+      if (!previousStream || !currentRoomId) {
+        pendingStreamRef.current = null;
+        nextStream.getTracks().forEach((track) => track.stop());
+        throw new Error("The previous screen source is no longer active.");
+      }
+
+      if (nextStream.getVideoTracks()[0]?.readyState !== "live") {
+        pendingStreamRef.current = null;
+        nextStream.getTracks().forEach((track) => track.stop());
+        throw new Error("The selected screen source ended before it could be committed.");
+      }
+
       attachEndedListener(
         nextStream,
         currentRoomId,
@@ -186,24 +320,26 @@ export function ScreenProvider({ children }: PropsWithChildren) {
         activeOnSystemEndedRef.current,
       );
 
-      intentionallyStoppedStreamsRef.current.add(previousStream);
+      pendingStreamRef.current = null;
       activeStreamRef.current = nextStream;
-      activeRoomIdRef.current = currentRoomId;
       setStream(nextStream);
-      setRoomId(currentRoomId);
-      setStartedAt(currentStartedAt);
 
+      // Only after the candidate has become the active screen source do we
+      // intentionally stop the previous capture.
+      intentionallyStoppedStreamsRef.current.add(previousStream);
       previousStream.getTracks().forEach((track) => track.stop());
+      setShareError(null);
+    },
+    [clearSession],
+  );
 
-      return nextStream;
-    } catch {
-      setShareError("Screen source change was cancelled or could not be completed.");
-      return null;
-    } finally {
-      isRequestingScreenRef.current = false;
-      setIsRequestingScreen(false);
+  const discardSource = useCallback((candidateStream: MediaStream) => {
+    if (pendingStreamRef.current === candidateStream) {
+      pendingStreamRef.current = null;
     }
-  }, [clearSession, startedAt]);
+
+    candidateStream.getTracks().forEach((track) => track.stop());
+  }, []);
 
   const value = useMemo(
     () => ({
@@ -215,6 +351,8 @@ export function ScreenProvider({ children }: PropsWithChildren) {
       shareError,
       startSharing,
       changeSource,
+      commitSource,
+      discardSource,
       stopSharing,
     }),
     [
@@ -225,6 +363,8 @@ export function ScreenProvider({ children }: PropsWithChildren) {
       shareError,
       startSharing,
       changeSource,
+      commitSource,
+      discardSource,
       stopSharing,
     ],
   );

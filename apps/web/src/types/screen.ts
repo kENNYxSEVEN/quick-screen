@@ -12,5 +12,7 @@ export interface ScreenContextValue {
   shareError: string | null;
   startSharing(options: StartSharingOptions): Promise<MediaStream | null>;
   changeSource(): Promise<MediaStream | null>;
+  commitSource(stream: MediaStream): void;
+  discardSource(stream: MediaStream): void;
   stopSharing(): void;
 }

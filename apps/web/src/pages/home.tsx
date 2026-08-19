@@ -10,6 +10,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Brand } from "@/components/brand";
+import { HeaderUtilities } from "@/components/header-utilities";
+import { FloatingAlertStack } from "@/components/floating-alert-stack";
 import { StreamSettings } from "@/components/stream-settings";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -34,11 +36,12 @@ import { getRecentRoom, rememberRoom } from "@/lib/recent-room";
 
 type RecentRoomState = "checking" | "available" | "host" | "viewer" | "unavailable";
 
-async function getExistingRoomRole(roomId: string) {
+async function getExistingRoomAccess(roomId: string) {
   try {
-    await getRoom(roomId);
+    const room = await getRoom(roomId);
+    const role = await getRoomRole(roomId);
 
-    return await getRoomRole(roomId);
+    return { room, role };
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
       return null;
@@ -46,6 +49,42 @@ async function getExistingRoomRole(roomId: string) {
 
     throw error;
   }
+}
+
+async function getExistingRoomRole(roomId: string) {
+  const access = await getExistingRoomAccess(roomId);
+
+  return access?.role ?? null;
+}
+
+
+function GridBackground() {
+  const gridStyle = {
+    backgroundImage:
+      "linear-gradient(to right, rgba(255,255,255,0.045) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.045) 1px, transparent 1px)",
+    backgroundSize: "43px 43px",
+    backgroundPosition: "center center",
+
+    maskImage:
+      "linear-gradient(to right, transparent 0%, black 22%, black 52%, transparent 100%), linear-gradient(to bottom, transparent 0%, black 32%, black 80%, transparent 100%)",
+    maskComposite: "intersect",
+
+    WebkitMaskImage:
+      "linear-gradient(to right, transparent 0%, black 22%, black 52%, transparent 100%), linear-gradient(to bottom, transparent 0%, black 32%, black 80%, transparent 100%)",
+    WebkitMaskComposite: "source-in",
+  } as const;
+
+  return (
+    <div
+      className="pointer-events-none absolute inset-0 overflow-hidden"
+      aria-hidden="true"
+    >
+      <div
+        className="absolute inset-0 opacity-80"
+        style={gridStyle}
+      />
+    </div>
+  );
 }
 
 export function Home() {
@@ -143,6 +182,31 @@ export function Home() {
     setRequestError(null);
   }
 
+  async function endPreviousWaitingRoom(nextRoomId: string) {
+    if (!recentRoom || recentRoom.roomId === nextRoomId) {
+      return;
+    }
+
+    const previousRoomAccess = await getExistingRoomAccess(recentRoom.roomId);
+
+    if (
+      !previousRoomAccess ||
+      previousRoomAccess.role !== "host" ||
+      previousRoomAccess.room.status !== "waiting"
+    ) {
+      return;
+    }
+
+    await deleteRoom(recentRoom.roomId);
+
+    if (import.meta.env.DEV) {
+      console.info("[room] previous waiting room ended before starting a new room", {
+        previousRoomId: recentRoom.roomId,
+        nextRoomId,
+      });
+    }
+  }
+
   async function removeCreatedRoom(roomIdToDelete: string) {
     try {
       await deleteRoom(roomIdToDelete);
@@ -168,16 +232,16 @@ export function Home() {
     setIsCreatingRoom(true);
 
     try {
-      const existingRoomRole = await getExistingRoomRole(normalizedRoomName);
+      const existingRoomAccess = await getExistingRoomAccess(normalizedRoomName);
 
-      if (existingRoomRole === "host") {
+      if (existingRoomAccess?.role === "host") {
         rememberRoom(normalizedRoomName);
         navigate(`/${normalizedRoomName}`);
 
         return;
       }
 
-      if (existingRoomRole === "viewer") {
+      if (existingRoomAccess?.role === "viewer") {
         setRequestError("This room name is already in use.");
 
         return;
@@ -197,6 +261,7 @@ export function Home() {
       }
 
       try {
+        await endPreviousWaitingRoom(normalizedRoomName);
         await publish(normalizedRoomName, sharedStream);
 
         if (sharedStream.getVideoTracks()[0]?.readyState !== "live") {
@@ -233,19 +298,19 @@ export function Home() {
       ? {
         label: "In use",
         disabled: true,
-        className: "border-white/10 bg-white/[0.02] text-zinc-600",
+        className: "border-white/10 bg-white/[0.02] text-zinc-500",
       }
       : recentRoomState === "checking"
         ? {
           label: "Checking",
           disabled: true,
-          className: "border-white/10 bg-white/[0.02] text-zinc-600",
+          className: "border-white/10 bg-white/[0.02] text-zinc-500",
         }
         : recentRoomState === "unavailable"
           ? {
             label: "Unavailable",
             disabled: true,
-            className: "border-white/10 bg-white/[0.02] text-zinc-600",
+            className: "border-white/10 bg-white/[0.02] text-zinc-500",
           }
           : {
             label: "Use room",
@@ -254,64 +319,78 @@ export function Home() {
           };
 
   return (
-    <main className="flex min-h-svh flex-col bg-zinc-950 text-white">
-            <header className="h-16 shrink-0 border-b border-white/[0.06] px-4 sm:px-6 lg:px-8">
+    <main className="flex min-h-svh flex-col bg-[#080808] text-white">
+      <FloatingAlertStack
+        alerts={
+          displayError
+            ? [
+                {
+                  id: requestError ? "home-request-error" : "screen-share-error",
+                  description: displayError,
+                  variant: "error",
+                },
+              ]
+            : []
+        }
+      />
+      <header className="h-16 shrink-0 border-b border-white/[0.055] bg-[#0d0d0d] px-5 sm:px-7 lg:px-8">
         <div className="mx-auto flex h-full w-full max-w-6xl items-center">
           <Brand />
+          <HeaderUtilities />
         </div>
       </header>
 
-      <section className="flex flex-1 items-center justify-center px-5 py-10 sm:px-8 sm:py-12">
-        <div className="w-full max-w-[520px]">
-          <div className="mb-8 text-center sm:mb-9">
-            <h1 className="text-[2rem] font-semibold leading-[0.98] tracking-[-0.045em] sm:text-[2.5rem]">
+      <section className="relative flex flex-1 items-center justify-center overflow-hidden px-5 py-10 sm:px-8 sm:py-12">
+        <GridBackground />
+
+        <div className="relative z-10 w-full max-w-[450px] sm:-translate-y-6">
+          <div className="mb-8 text-center">
+            <h1 className="text-[2.25rem] font-semibold leading-[0.98] tracking-[-0.045em] text-zinc-50 sm:text-[2.625rem]">
               <span className="block">Pick a name.</span>
               <span className="mt-1 block">Share the link.</span>
             </h1>
-            <p className="mt-4 text-sm leading-6 text-zinc-500 sm:text-base">
+            <p className="mt-4 text-sm leading-6 text-zinc-400 sm:text-[15px]">
               Choose a room name and start sharing.
             </p>
           </div>
 
-          <Card className="gap-0 overflow-visible border-white/10 bg-white/[0.025] p-5 shadow-2xl shadow-black/20 sm:p-6">
+          <Card className="gap-0 overflow-visible rounded-xl border-white/[0.09] bg-[#121212] p-5 shadow-[0_24px_70px_rgba(0,0,0,0.22)] sm:p-6">
             <div>
               <label
                 htmlFor="room-name"
-                className="text-sm font-medium text-zinc-300"
+                className="text-[13px] font-medium text-zinc-300"
               >
                 Room name
               </label>
 
-              <div className="mt-2 flex gap-2">
-                <div className="flex min-w-0 flex-1 items-center rounded-lg border border-white/10 bg-zinc-950/80 focus-within:border-white/20">
-                  <span className="hidden border-r border-white/10 px-3 text-sm text-zinc-600 sm:block">
-                    /
-                  </span>
+              <div className="relative mt-2 flex h-12 items-center rounded-lg border border-white/[0.09] bg-[#0a0a0a] transition-colors focus-within:border-white/[0.18]">
+                <span className="flex h-6 shrink-0 items-center border-r border-white/[0.07] px-3 text-sm text-zinc-500">
+                  /
+                </span>
 
-                  <input
-                    id="room-name"
-                    value={roomName}
-                    onChange={(event) => handleRoomNameChange(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        void handleStartSharing();
-                      }
-                    }}
-                    maxLength={48}
-                    autoComplete="off"
-                    spellCheck={false}
-                    className="h-11 min-w-0 flex-1 bg-transparent px-3 text-sm font-medium text-white outline-none placeholder:text-zinc-700"
-                    placeholder="my-room"
-                    aria-invalid={roomNameError !== null}
-                    aria-describedby={roomNameError ? "room-name-error" : undefined}
-                  />
-                </div>
+                <input
+                  id="room-name"
+                  value={roomName}
+                  onChange={(event) => handleRoomNameChange(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      void handleStartSharing();
+                    }
+                  }}
+                  maxLength={48}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="h-full min-w-0 flex-1 bg-transparent px-3 pr-11 text-sm font-medium text-zinc-100 outline-none placeholder:text-zinc-600"
+                  placeholder="my-room"
+                  aria-invalid={roomNameError !== null}
+                  aria-describedby={roomNameError ? "room-name-error" : undefined}
+                />
 
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="ghost"
                   size="icon"
-                  className="size-11 shrink-0 border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.07]"
+                  className="absolute right-1.5 top-1/2 size-9 -translate-y-1/2 rounded-md text-zinc-500 hover:bg-white/[0.05] hover:text-zinc-300"
                   onClick={generateAnotherRoom}
                   aria-label="Generate another room name"
                   title="Generate another room name"
@@ -329,20 +408,23 @@ export function Home() {
                   {roomNameError}
                 </p>
               ) : (
-                <div className="mt-2 flex min-w-0 items-center gap-2 text-xs text-zinc-600">
-                  <Link2 className="size-3.5 shrink-0" aria-hidden="true" />
-                  <span className="truncate">{roomUrl}</span>
+                <div className="mt-2.5 flex min-w-0 items-center gap-2 text-xs">
+                  <Link2
+                    className="size-3.5 shrink-0 text-zinc-500"
+                    aria-hidden="true"
+                  />
+                  <span className="truncate text-zinc-500">{roomUrl}</span>
                 </div>
               )}
             </div>
 
-            <div className="mt-5 flex items-center gap-2">
+            <div className="mt-4 flex items-center gap-2">
               <Button
                 size="lg"
                 className={
                   isSharing
-                    ? "h-11 min-w-0 flex-1 border border-emerald-400/25 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/20"
-                    : "h-11 min-w-0 flex-1"
+                    ? "h-11 min-w-0 flex-1 rounded-lg border border-emerald-400/25 bg-emerald-500/15 px-4 text-emerald-200 hover:bg-emerald-500/20"
+                    : "h-11 min-w-0 flex-1 rounded-lg bg-zinc-100 px-4 text-zinc-950 hover:bg-white"
                 }
                 disabled={isStartPending}
                 onClick={() => void handleStartSharing()}
@@ -351,40 +433,37 @@ export function Home() {
                   <>
                     <span className="relative flex size-4 items-center justify-center">
                       <span className="absolute size-3 animate-ping rounded-full bg-emerald-400/40" />
-                      <Radio className="relative size-4 text-emerald-400" aria-hidden="true" />
+                      <Radio
+                        className="relative size-4 text-emerald-400"
+                        aria-hidden="true"
+                      />
                     </span>
                     Return to live session
-                    <ArrowRight className="size-4" aria-hidden="true" />
+                    <ArrowRight className="ml-auto size-4" aria-hidden="true" />
                   </>
                 ) : (
                   <>
                     <MonitorUp className="size-4" aria-hidden="true" />
                     {isStartPending ? "Preparing room" : "Start sharing"}
-                    {!isStartPending && <ArrowRight className="size-4" aria-hidden="true" />}
+                    {!isStartPending && (
+                      <ArrowRight className="ml-auto size-4" aria-hidden="true" />
+                    )}
                   </>
                 )}
               </Button>
 
               <StreamSettings
+                placement="home"
                 buttonSize="icon"
-                buttonClassName="size-11 border-white/10 bg-white/[0.03] text-zinc-300 shadow-none hover:bg-white/[0.07]"
+                buttonClassName="size-11 rounded-lg border-white/[0.09] bg-white/[0.025] text-zinc-400 shadow-none hover:border-white/[0.13] hover:bg-white/[0.055] hover:text-zinc-200"
               />
             </div>
 
-            {displayError && (
-              <p
-                className="mt-3 text-center text-sm text-red-300"
-                role="alert"
-              >
-                {displayError}
-              </p>
-            )}
-
             {recentRoom && (
-              <div className="mt-5 border-t border-white/10 pt-4">
+              <div className="mt-4 border-t border-white/[0.08] pt-4">
                 <div className="flex items-center justify-between gap-4">
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2 text-xs text-zinc-500">
+                    <div className="flex items-center gap-2 text-xs text-zinc-400">
                       <History className="size-3.5" aria-hidden="true" />
                       <span>Your recent room</span>
                     </div>
@@ -399,7 +478,7 @@ export function Home() {
                     size="sm"
                     onClick={handleRecentRoomAction}
                     disabled={recentRoomAction.disabled}
-                    className={`shrink-0 ${recentRoomAction.className}`}
+                    className={`h-8 shrink-0 rounded-lg px-3 ${recentRoomAction.className}`}
                   >
                     {recentRoomAction.label}
                   </Button>
@@ -408,13 +487,13 @@ export function Home() {
             )}
           </Card>
 
-          <p className="mt-5 text-center text-xs text-zinc-700">
+          <p className="mt-4 text-center text-[11px] leading-5 text-zinc-500">
             No account required. Room names are reusable after a room ends.
           </p>
         </div>
       </section>
 
-      <footer className="flex h-12 shrink-0 items-center justify-center border-t border-white/[0.04] px-5 text-xs text-zinc-700">
+      <footer className="flex h-12 shrink-0 items-center justify-center border-t border-white/[0.04] bg-[#0d0d0d] px-5 text-[11px] text-zinc-600">
         © 2026 iNGAMERS.PRO
       </footer>
     </main>
