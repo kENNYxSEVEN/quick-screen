@@ -21,15 +21,14 @@ Create a room, share a screen, send the link. No accounts and no client applicat
 
 ## Screenshots
 
-### Home page
-![QUICK SCREEN home](https://i.ibb.co/CsV4bPnV/home.png)
+### Home
+![QUICK SCREEN home page](./docs/screenshots/home.png)
 
-### Viewer live room
-![QUICK SCREEN viewer live room](https://i.ibb.co/PvXdM6kC/live-room.png)
+### Host
+![QUICK SCREEN host room](./docs/screenshots/host.png)
 
-### Host room with stream settings
-![QUICK SCREEN host room](https://i.ibb.co/DxKyyJj/host-room.png)
-
+### Viewer
+![QUICK SCREEN viewer live room](./docs/screenshots/viewer.png)
 
 ## Features
 
