@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/card";
 import { useMedia } from "@/hooks/use-media";
 import { useScreen } from "@/hooks/use-screen";
 import { useSessionDuration } from "@/hooks/use-session-duration";
+import { useViewerPresenceSounds } from "@/hooks/use-viewer-presence-sounds";
 import {
   deleteRoom,
   deleteRoomMedia,
@@ -53,6 +54,7 @@ export function Stream({ room }: StreamProps) {
     stopSharing,
   } = useScreen();
   const duration = useSessionDuration(startedAt);
+  useViewerPresenceSounds(room.id, room.viewers);
   const roomUrl = `${window.location.origin}/${room.id}`;
   const displayError = shareError ?? roomError;
 
